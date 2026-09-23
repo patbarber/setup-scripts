@@ -17,6 +17,11 @@
 #       --no-color        Disable ANSI colour
 #       --no-versions     Skip version probing (much faster)
 #       --strict          Exit non-zero if anything is missing
+#       --install         After the survey, walk through missing tools
+#                         category by category and install the ones you pick
+#       --dry-run         Like --install, but print the commands instead of
+#                         running them
+#   -y, --yes             Skip the final confirmation prompt (with --install)
 #   -h, --help            Show this help
 
 set -u
@@ -32,8 +37,11 @@ FORMAT="table"    # table | json
 USE_COLOR="auto"
 PROBE_VERSIONS=1
 STRICT=0
+INSTALL_MODE=0
+DRY_RUN=0
+ASSUME_YES=0
 
-usage() { sed -n '3,22p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '3,25p' "$0" | sed 's/^# \{0,1\}//'; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -45,6 +53,9 @@ while [ $# -gt 0 ]; do
     --no-color)     USE_COLOR="never"; shift ;;
     --no-versions)  PROBE_VERSIONS=0; shift ;;
     --strict)       STRICT=1; shift ;;
+    --install)      INSTALL_MODE=1; shift ;;
+    --dry-run)      INSTALL_MODE=1; DRY_RUN=1; shift ;;
+    -y|--yes)       ASSUME_YES=1; shift ;;
     -h|--help)      usage; exit 0 ;;
     -V|--version)   echo "check-devtools.sh $VERSION"; exit 0 ;;
     *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
@@ -356,6 +367,7 @@ MISSING=0
 BROKEN=0
 MISSING_LIST=""
 BROKEN_LIST=""
+MISSING_RECORDS=""
 
 # Buffer table rows per category so we can skip empty categories.
 run_category() {
@@ -417,12 +429,16 @@ run_category() {
     elif [ "$ok" -eq 2 ]; then
       BROKEN=$((BROKEN + 1))
       BROKEN_LIST="$BROKEN_LIST $label"
+      MISSING_RECORDS="$MISSING_RECORDS$cat_key|$label|$bin|broken
+"
       [ "$SHOW" = "installed" ] && continue
       mark="${C_YELLOW}!${C_RESET}"
       version="on PATH but not runnable — ${version}"
     else
       MISSING=$((MISSING + 1))
       MISSING_LIST="$MISSING_LIST $label"
+      MISSING_RECORDS="$MISSING_RECORDS$cat_key|$label|$bin|missing
+"
       [ "$SHOW" = "installed" ] && continue
       mark="${C_RED}✗${C_RESET}"
     fi
@@ -515,6 +531,426 @@ platform_notes() {
   fi
 }
 
+
+# =========================================================================== #
+#                            GUIDED INSTALLATION                              #
+# =========================================================================== #
+#
+# Recipes map a binary to a package name per package manager. One line per
+# tool:  bin|mgr=pkg mgr=pkg ...
+#
+# Recognised managers, in the order they are preferred:
+#   brew  cask  apt  dnf  pacman  zypper  apk  npm  cargo  pipx  gem  go
+#
+# `cask` is macOS-only (GUI apps). Anything with no recipe is reported as
+# "no automated recipe" rather than silently skipped.
+
+RECIPES='
+node|brew=node apt=nodejs dnf=nodejs pacman=nodejs apk=nodejs
+deno|brew=deno pacman=deno
+bun|brew=bun
+python3|brew=python apt=python3 dnf=python3 pacman=python apk=python3
+ruby|brew=ruby apt=ruby-full dnf=ruby pacman=ruby apk=ruby
+go|brew=go apt=golang dnf=golang pacman=go apk=go
+kotlin|brew=kotlin pacman=kotlin
+scala|brew=scala pacman=scala
+php|brew=php apt=php dnf=php pacman=php apk=php
+lua|brew=lua apt=lua5.4 dnf=lua pacman=lua apk=lua5.4
+luajit|brew=luajit apt=luajit dnf=luajit pacman=luajit
+elixir|brew=elixir apt=elixir dnf=elixir pacman=elixir apk=elixir
+erl|brew=erlang apt=erlang dnf=erlang pacman=erlang
+zig|brew=zig pacman=zig apk=zig
+julia|brew=julia pacman=julia
+Rscript|brew=r apt=r-base dnf=R pacman=r
+ghc|brew=ghc apt=ghc pacman=ghc
+crystal|brew=crystal pacman=crystal
+nim|brew=nim apt=nim dnf=nim pacman=nim
+
+pnpm|brew=pnpm npm=pnpm
+yarn|brew=yarn npm=yarn
+pip3|apt=python3-pip dnf=python3-pip pacman=python-pip apk=py3-pip
+pipx|brew=pipx apt=pipx dnf=pipx pacman=python-pipx
+poetry|brew=poetry pipx=poetry
+bundle|gem=bundler
+composer|brew=composer apt=composer dnf=composer pacman=composer
+pod|gem=cocoapods
+mvn|brew=maven apt=maven dnf=maven pacman=maven
+gradle|brew=gradle apt=gradle dnf=gradle pacman=gradle
+flatpak|apt=flatpak dnf=flatpak pacman=flatpak
+
+fnm|brew=fnm cargo=fnm
+volta|brew=volta
+asdf|brew=asdf
+mise|brew=mise cargo=mise
+pyenv|brew=pyenv
+rbenv|brew=rbenv
+jenv|brew=jenv
+direnv|brew=direnv apt=direnv dnf=direnv pacman=direnv apk=direnv
+
+gcc|apt=build-essential dnf=gcc pacman=gcc apk=build-base
+g++|apt=build-essential dnf=gcc-c++ pacman=gcc apk=build-base
+make|apt=make dnf=make pacman=make apk=make
+cmake|brew=cmake apt=cmake dnf=cmake pacman=cmake apk=cmake
+ninja|brew=ninja apt=ninja-build dnf=ninja-build pacman=ninja apk=ninja
+bazel|brew=bazelisk
+just|brew=just apt=just dnf=just pacman=just cargo=just
+pkg-config|brew=pkg-config apt=pkg-config dnf=pkgconf pacman=pkgconf apk=pkgconf
+autoconf|brew=autoconf apt=autoconf dnf=autoconf pacman=autoconf
+gdb|brew=gdb apt=gdb dnf=gdb pacman=gdb apk=gdb
+lldb|brew=llvm apt=lldb dnf=lldb pacman=lldb
+protoc|brew=protobuf apt=protobuf-compiler dnf=protobuf-compiler pacman=protobuf apk=protobuf
+
+adb|brew=android-platform-tools apt=android-sdk-platform-tools dnf=android-tools pacman=android-tools
+fastlane|brew=fastlane gem=fastlane
+eas|npm=eas-cli
+
+docker|cask=docker apt=docker.io dnf=docker pacman=docker
+podman|brew=podman apt=podman dnf=podman pacman=podman apk=podman
+colima|brew=colima
+kubectl|brew=kubectl apt=kubectl dnf=kubernetes-client pacman=kubectl
+helm|brew=helm dnf=helm pacman=helm
+k9s|brew=k9s pacman=k9s
+minikube|brew=minikube pacman=minikube
+terraform|brew=hashicorp/tap/terraform
+tofu|brew=opentofu pacman=opentofu
+pulumi|brew=pulumi
+ansible|brew=ansible apt=ansible dnf=ansible pacman=ansible apk=ansible
+vagrant|brew=hashicorp/tap/hashicorp-vagrant pacman=vagrant
+aws|brew=awscli apt=awscli dnf=awscli pacman=aws-cli
+cdk|npm=aws-cdk
+az|brew=azure-cli pacman=azure-cli
+firebase|npm=firebase-tools
+wrangler|npm=wrangler
+vercel|npm=vercel
+netlify|npm=netlify-cli
+supabase|brew=supabase/tap/supabase
+flyctl|brew=flyctl
+heroku|brew=heroku/brew/heroku npm=heroku
+doctl|brew=doctl pacman=doctl
+tailscale|cask=tailscale pacman=tailscale
+ngrok|cask=ngrok
+cloudflared|brew=cloudflared pacman=cloudflared
+
+sqlite3|brew=sqlite apt=sqlite3 dnf=sqlite pacman=sqlite apk=sqlite
+psql|brew=libpq apt=postgresql-client dnf=postgresql pacman=postgresql-libs
+mysql|brew=mysql-client apt=default-mysql-client dnf=mysql pacman=mariadb-clients
+redis-cli|brew=redis apt=redis-tools dnf=redis pacman=redis
+mongosh|brew=mongosh
+duckdb|brew=duckdb pacman=duckdb
+dbt|pipx=dbt-core
+turso|brew=tursodatabase/tap/turso
+
+git|brew=git apt=git dnf=git pacman=git apk=git
+git-lfs|brew=git-lfs apt=git-lfs dnf=git-lfs pacman=git-lfs apk=git-lfs
+gh|brew=gh apt=gh dnf=gh pacman=github-cli apk=github-cli
+glab|brew=glab pacman=glab
+lazygit|brew=lazygit dnf=lazygit pacman=lazygit apk=lazygit
+hg|brew=mercurial apt=mercurial dnf=mercurial pacman=mercurial
+pre-commit|brew=pre-commit apt=pre-commit dnf=pre-commit pacman=pre-commit pipx=pre-commit
+
+nvim|brew=neovim apt=neovim dnf=neovim pacman=neovim apk=neovim
+vim|brew=vim apt=vim dnf=vim pacman=vim apk=vim
+emacs|brew=emacs apt=emacs dnf=emacs pacman=emacs
+code|cask=visual-studio-code
+cursor|cask=cursor
+zed|cask=zed
+tmux|brew=tmux apt=tmux dnf=tmux pacman=tmux apk=tmux
+claude|npm=@anthropic-ai/claude-code
+
+rg|brew=ripgrep apt=ripgrep dnf=ripgrep pacman=ripgrep apk=ripgrep
+fd|brew=fd apt=fd-find dnf=fd-find pacman=fd apk=fd
+fzf|brew=fzf apt=fzf dnf=fzf pacman=fzf apk=fzf
+bat|brew=bat apt=bat dnf=bat pacman=bat apk=bat
+eza|brew=eza apt=eza dnf=eza pacman=eza
+lsd|brew=lsd apt=lsd dnf=lsd pacman=lsd
+zoxide|brew=zoxide apt=zoxide dnf=zoxide pacman=zoxide apk=zoxide
+jq|brew=jq apt=jq dnf=jq pacman=jq apk=jq
+yq|brew=yq apt=yq dnf=yq pacman=go-yq
+htop|brew=htop apt=htop dnf=htop pacman=htop apk=htop
+btop|brew=btop apt=btop dnf=btop pacman=btop apk=btop
+tree|brew=tree apt=tree dnf=tree pacman=tree apk=tree
+curl|brew=curl apt=curl dnf=curl pacman=curl apk=curl
+wget|brew=wget apt=wget dnf=wget pacman=wget apk=wget
+http|brew=httpie apt=httpie dnf=httpie pacman=httpie
+watchman|brew=watchman
+gpg|brew=gnupg apt=gnupg dnf=gnupg2 pacman=gnupg apk=gnupg
+openssl|brew=openssl apt=openssl dnf=openssl pacman=openssl apk=openssl
+mkcert|brew=mkcert apt=mkcert dnf=mkcert pacman=mkcert
+sops|brew=sops dnf=sops pacman=sops
+ffmpeg|brew=ffmpeg apt=ffmpeg dnf=ffmpeg pacman=ffmpeg apk=ffmpeg
+magick|brew=imagemagick apt=imagemagick dnf=ImageMagick pacman=imagemagick apk=imagemagick
+pandoc|brew=pandoc apt=pandoc dnf=pandoc pacman=pandoc
+tesseract|brew=tesseract apt=tesseract-ocr dnf=tesseract pacman=tesseract
+
+shellcheck|brew=shellcheck apt=shellcheck dnf=ShellCheck pacman=shellcheck apk=shellcheck
+shfmt|brew=shfmt apt=shfmt dnf=shfmt pacman=shfmt
+tsc|npm=typescript
+eslint|npm=eslint
+prettier|npm=prettier
+ruff|brew=ruff pipx=ruff pacman=ruff
+black|brew=black pipx=black pacman=python-black
+mypy|brew=mypy pipx=mypy pacman=mypy
+hadolint|brew=hadolint pacman=hadolint
+trivy|brew=trivy pacman=trivy
+semgrep|brew=semgrep pipx=semgrep
+'
+
+# Tools whose upstream install is a shell script rather than a package. These
+# pipe a remote script into a shell, so they are always shown in full and
+# never bundled into a silent batch.
+SCRIPT_RECIPES='
+rustc|curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh
+cargo|curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh
+rustup|curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh
+uv|curl -LsSf https://astral.sh/uv/install.sh | sh
+bun|curl -fsSL https://bun.sh/install | bash
+deno|curl -fsSL https://deno.land/install.sh | sh
+nvm|curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+sdk|curl -s https://get.sdkman.io | bash
+flutter|echo "See https://docs.flutter.dev/get-started/install"
+dotnet|echo "See https://dotnet.microsoft.com/download"
+java|echo "Install a JDK: brew install openjdk / apt install default-jdk / sdk install java"
+javac|echo "Install a JDK: brew install openjdk / apt install default-jdk / sdk install java"
+gcloud|echo "See https://cloud.google.com/sdk/docs/install"
+xcodebuild|echo "Install Xcode from the Mac App Store"
+xcrun|echo "Run: xcode-select --install"
+'
+
+# --------------------------------------------------- manager availability ---
+
+NEEDS_SUDO=""
+if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
+  NEEDS_SUDO="sudo "
+fi
+
+# Preference order. brew first where present: it is the same invocation on
+# both platforms and does not need root.
+manager_available() {
+  case "$1" in
+    brew)   command -v brew    >/dev/null 2>&1 ;;
+    cask)   [ "$PLATFORM" = "mac" ] && command -v brew >/dev/null 2>&1 ;;
+    apt)    command -v apt-get >/dev/null 2>&1 ;;
+    dnf)    command -v dnf     >/dev/null 2>&1 ;;
+    pacman) command -v pacman  >/dev/null 2>&1 ;;
+    zypper) command -v zypper  >/dev/null 2>&1 ;;
+    apk)    command -v apk     >/dev/null 2>&1 ;;
+    npm)    command -v npm     >/dev/null 2>&1 ;;
+    cargo)  command -v cargo   >/dev/null 2>&1 ;;
+    pipx)   command -v pipx    >/dev/null 2>&1 ;;
+    gem)    command -v gem     >/dev/null 2>&1 ;;
+    go)     command -v go      >/dev/null 2>&1 ;;
+    *) return 1 ;;
+  esac
+}
+
+manager_command() {
+  mgr="$1"; pkg="$2"
+  case "$mgr" in
+    brew)   echo "brew install $pkg" ;;
+    cask)   echo "brew install --cask $pkg" ;;
+    apt)    echo "${NEEDS_SUDO}env DEBIAN_FRONTEND=noninteractive apt-get install -y $pkg" ;;
+    dnf)    echo "${NEEDS_SUDO}dnf install -y $pkg" ;;
+    pacman) echo "${NEEDS_SUDO}pacman -S --noconfirm $pkg" ;;
+    zypper) echo "${NEEDS_SUDO}zypper install -y $pkg" ;;
+    apk)    echo "${NEEDS_SUDO}apk add $pkg" ;;
+    npm)    echo "npm install -g $pkg" ;;
+    cargo)  echo "cargo install $pkg" ;;
+    pipx)   echo "pipx install $pkg" ;;
+    gem)    echo "gem install $pkg" ;;
+    go)     echo "go install $pkg" ;;
+  esac
+}
+
+MANAGER_ORDER="brew cask apt dnf pacman zypper apk npm cargo pipx gem go"
+
+# Resolve the install command for a binary, or print nothing if there is no
+# recipe that this machine can actually run.
+resolve_install() {
+  want="$1"
+
+  spec="$(printf '%s\n' "$RECIPES" | awk -F'|' -v b="$want" '$1==b {print $2; exit}')"
+  if [ -n "$spec" ]; then
+    for mgr in $MANAGER_ORDER; do
+      manager_available "$mgr" || continue
+      for tok in $spec; do
+        case "$tok" in
+          "$mgr"=*) manager_command "$mgr" "${tok#*=}"; return 0 ;;
+        esac
+      done
+    done
+  fi
+
+  script="$(printf '%s\n' "$SCRIPT_RECIPES" | awk -F'|' -v b="$want" '$1==b {sub(/^[^|]*\|/,""); print; exit}')"
+  if [ -n "$script" ]; then
+    printf '%s' "$script"
+    return 0
+  fi
+
+  return 1
+}
+
+# ------------------------------------------------------------- the prompt ---
+
+# Prompts read from the terminal, not stdin, so the script still behaves when
+# its output is piped somewhere.
+ask() {
+  prompt="$1"
+  REPLY=""
+  # Try the controlling terminal first; fall back to stdin when there is none
+  # (piped input, CI, a harness), so the script stays scriptable either way.
+  if { exec 3< /dev/tty; } 2>/dev/null; then
+    printf '%b' "$prompt" > /dev/tty
+    IFS= read -r REPLY <&3 || REPLY=""
+    exec 3<&-
+  else
+    printf '%b' "$prompt"
+    IFS= read -r REPLY || REPLY=""
+    printf '%s\n' "$REPLY"
+  fi
+}
+
+# Expand "1 3 5-8" into "1 3 5 6 7 8".
+expand_selection() {
+  for part in $1; do
+    case "$part" in
+      *-*)
+        lo="${part%-*}"; hi="${part#*-}"
+        case "$lo$hi" in *[!0-9]*) continue ;; esac
+        i="$lo"
+        while [ "$i" -le "$hi" ]; do printf '%s ' "$i"; i=$((i + 1)); done
+        ;;
+      *)
+        case "$part" in *[!0-9]*) continue ;; esac
+        printf '%s ' "$part"
+        ;;
+    esac
+  done
+}
+
+guided_install() {
+  [ -z "$MISSING_RECORDS" ] && {
+    printf '\n%sNothing missing — no install step needed.%s\n' "$C_GREEN" "$C_RESET"
+    return 0
+  }
+
+  printf '\n%s%s%s\n' "$C_BOLD" "──────── Guided install ────────" "$C_RESET"
+  printf '%sPick what to install, one category at a time. Nothing is installed\n' "$C_DIM"
+  printf 'until you confirm the full plan at the end.%s\n' "$C_RESET"
+
+  mgrs=""
+  for mgr in $MANAGER_ORDER; do
+    manager_available "$mgr" && mgrs="$mgrs $mgr"
+  done
+  printf '%sAvailable package managers:%s%s\n' "$C_DIM" "$mgrs" "$C_RESET"
+
+  PLAN=""
+  PLAN_COUNT=0
+
+  for cat_key in $CATEGORY_ORDER; do
+    wanted_category "$cat_key" || continue
+
+    # Build the candidate list for this category.
+    cand_labels=""; cand_cmds=""; n=0
+    listing=""
+    while IFS='|' read -r rc label bin state; do
+      [ -z "${rc:-}" ] && continue
+      [ "$rc" != "$cat_key" ] && continue
+      cmd="$(resolve_install "$bin" 2>/dev/null || true)"
+      [ -z "$cmd" ] && continue
+      n=$((n + 1))
+      cand_labels="$cand_labels$n|$label
+"
+      cand_cmds="$cand_cmds$n|$cmd
+"
+      tag=""
+      [ "$state" = "broken" ] && tag=" ${C_YELLOW}(installed but broken)${C_RESET}"
+      listing="$listing$(printf '  %2d) %-22s %s%s%s%s\n' "$n" "$label" "$C_DIM" "$cmd" "$C_RESET" "$tag")
+"
+    done <<CANDEOF
+$(printf '%s' "$MISSING_RECORDS")
+CANDEOF
+
+    [ "$n" -eq 0 ] && continue
+
+    printf '\n%s%s%s %s(%d available)%s\n' \
+      "$C_BOLD$C_BLUE" "$(category_title "$cat_key")" "$C_RESET" "$C_DIM" "$n" "$C_RESET"
+    printf '%s' "$listing"
+
+    ask "  → numbers (e.g. 1 3 5-7), ${C_BOLD}a${C_RESET}ll, ${C_BOLD}s${C_RESET}kip, ${C_BOLD}q${C_RESET}uit: "
+    sel="$REPLY"
+
+    case "$sel" in
+      q|Q|quit) printf '  %sstopping selection%s\n' "$C_DIM" "$C_RESET"; break ;;
+      ""|s|S|skip|n|N) printf '  %sskipped%s\n' "$C_DIM" "$C_RESET"; continue ;;
+      a|A|all) chosen="$(expand_selection "$(seq 1 "$n" | tr '\n' ' ')")" ;;
+      *) chosen="$(expand_selection "$sel")" ;;
+    esac
+
+    for idx in $chosen; do
+      [ "$idx" -ge 1 ] 2>/dev/null || continue
+      [ "$idx" -le "$n" ] || continue
+      lbl="$(printf '%s' "$cand_labels" | awk -F'|' -v i="$idx" '$1==i {print $2; exit}')"
+      cmd="$(printf '%s' "$cand_cmds"   | awk -F'|' -v i="$idx" '$1==i {sub(/^[0-9]*\|/,""); print; exit}')"
+      [ -z "$cmd" ] && continue
+      PLAN="$PLAN$lbl|$cmd
+"
+      PLAN_COUNT=$((PLAN_COUNT + 1))
+    done
+  done
+
+  if [ "$PLAN_COUNT" -eq 0 ]; then
+    printf '\n%sNothing selected.%s\n' "$C_DIM" "$C_RESET"
+    return 0
+  fi
+
+  printf '\n%sPlan — %d command(s):%s\n' "$C_BOLD" "$PLAN_COUNT" "$C_RESET"
+  printf '%s' "$PLAN" | while IFS='|' read -r lbl cmd; do
+    [ -z "${lbl:-}" ] && continue
+    printf '  %-22s %s%s%s\n' "$lbl" "$C_DIM" "$cmd" "$C_RESET"
+  done
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    printf '\n%sDry run — nothing was executed.%s\n' "$C_YELLOW" "$C_RESET"
+    return 0
+  fi
+
+  if [ "$ASSUME_YES" -ne 1 ]; then
+    ask "
+Run these now? [y/N] "
+    case "$REPLY" in
+      y|Y|yes|YES) ;;
+      *) printf '%sAborted — nothing was installed.%s\n' "$C_YELLOW" "$C_RESET"; return 0 ;;
+    esac
+  fi
+
+  # apt needs an index refresh before the first install of a session.
+  case "$PLAN" in
+    *apt-get\ install*) printf '\n%s$ %sapt-get update%s\n' "$C_DIM" "$NEEDS_SUDO" "$C_RESET"
+                        eval "${NEEDS_SUDO}apt-get update -qq" || true ;;
+  esac
+
+  ok_n=0; fail_n=0; failed=""
+  printf '%s' "$PLAN" > /tmp/.cdt_plan.$$
+  while IFS='|' read -r lbl cmd; do
+    [ -z "${lbl:-}" ] && continue
+    printf '\n%s==> %s%s\n%s$ %s%s\n' "$C_BOLD" "$lbl" "$C_RESET" "$C_DIM" "$cmd" "$C_RESET"
+    if eval "$cmd"; then
+      ok_n=$((ok_n + 1))
+      printf '%s    ok%s\n' "$C_GREEN" "$C_RESET"
+    else
+      fail_n=$((fail_n + 1)); failed="$failed $lbl"
+      printf '%s    failed%s\n' "$C_RED" "$C_RESET"
+    fi
+  done < /tmp/.cdt_plan.$$
+  rm -f /tmp/.cdt_plan.$$
+
+  printf '\n%sInstall summary%s  %s%d succeeded%s, %s%d failed%s\n' \
+    "$C_BOLD" "$C_RESET" "$C_GREEN" "$ok_n" "$C_RESET" "$C_RED" "$fail_n" "$C_RESET"
+  [ -n "$failed" ] && printf '%sFailed:%s%s\n' "$C_RED" "$C_RESET" "$failed"
+  printf '%sOpen a new shell (or re-source your profile) so new tools land on PATH.%s\n' \
+    "$C_DIM" "$C_RESET"
+}
+
 # --------------------------------------------------------------- run it ---
 
 if [ "$FORMAT" = "json" ]; then
@@ -557,6 +993,10 @@ printf '\n%sSummary%s  %s%d installed%s, %s%d broken%s, %s%d missing%s, %d check
 
 if [ "$BROKEN" -gt 0 ]; then
   printf '%sBroken:%s%s\n' "$C_YELLOW" "$C_RESET" "$BROKEN_LIST"
+fi
+
+if [ "$INSTALL_MODE" -eq 1 ]; then
+  guided_install
 fi
 
 if [ "$STRICT" -eq 1 ] && [ $((MISSING + BROKEN)) -gt 0 ]; then
