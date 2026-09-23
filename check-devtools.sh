@@ -246,7 +246,6 @@ editors|VS Code|code|all|"$BIN" --version 2>&1 | head -1
 editors|Cursor|cursor|all|"$BIN" --version 2>&1 | head -1
 editors|Zed|zed|all|
 editors|tmux|tmux|all|"$BIN" -V
-editors|Claude Code|claude|all|
 
 cli|ripgrep|rg|all|
 cli|fd|fd|all|
@@ -260,6 +259,15 @@ cli|yq|yq|all|"$BIN" --version 2>&1
 cli|htop|htop|all|"$BIN" --version 2>&1 | head -1
 cli|btop|btop|all|"$BIN" --version 2>&1 | head -1
 cli|tree|tree|all|"$BIN" --version 2>&1 | head -1
+cli|yazi|yazi|all|
+cli|ranger|ranger|all|"$BIN" --version 2>&1 | head -1
+cli|nnn|nnn|all|"$BIN" -V 2>&1 | head -1
+cli|lf|lf|all|"$BIN" -version 2>&1 | head -1
+cli|Midnight Commander|mc|all|"$BIN" --version 2>&1 | head -1
+cli|broot|broot|all|
+cli|xplr|xplr|all|
+cli|vifm|vifm|all|"$BIN" --version 2>&1 | head -1
+cli|superfile|spf|all|
 cli|curl|curl|all|"$BIN" --version 2>&1 | head -1
 cli|wget|wget|all|"$BIN" --version 2>&1 | head -1
 cli|httpie|http|all|
@@ -272,6 +280,21 @@ cli|ffmpeg|ffmpeg|all|"$BIN" -version 2>&1 | head -1
 cli|ImageMagick|magick|all|"$BIN" --version 2>&1 | head -1
 cli|pandoc|pandoc|all|"$BIN" --version 2>&1 | head -1
 cli|tesseract|tesseract|all|"$BIN" --version 2>&1 | head -1
+
+ai|Claude Code|claude|all|
+ai|Codex CLI (OpenAI)|codex|all|
+ai|Gemini CLI|gemini|all|
+ai|Copilot CLI (GitHub)|copilot|all|
+ai|pi|pi|all|
+ai|Hermes Agent|hermes|all|"$BIN" --version 2>&1 | head -1
+ai|opencode|opencode|all|
+ai|Cursor Agent|cursor-agent|all|
+ai|Amp (Sourcegraph)|amp|all|
+ai|Crush (Charm)|crush|all|"$BIN" --version 2>&1 | head -1
+ai|goose (Block)|goose|all|"$BIN" --version 2>&1 | head -1
+ai|Aider|aider|all|"$BIN" --version 2>&1 | head -1
+ai|llm (Datasette)|llm|all|
+ai|Ollama|ollama|all|"$BIN" --version 2>&1 | head -1
 
 quality|shellcheck|shellcheck|all|"$BIN" --version 2>&1 | grep -m1 version:
 quality|shfmt|shfmt|all|
@@ -327,6 +350,7 @@ category_title() {
     cloud)      echo "Cloud, containers & infra" ;;
     data)       echo "Databases & data" ;;
     vcs)        echo "Version control" ;;
+    ai)         echo "AI coding agents & harnesses" ;;
     editors)    echo "Editors & terminal" ;;
     cli)        echo "CLI utilities" ;;
     quality)    echo "Linters, formatters & scanners" ;;
@@ -334,7 +358,7 @@ category_title() {
   esac
 }
 
-CATEGORY_ORDER="runtimes pkgmgr versionmgr buildtools mobile cloud data vcs editors cli quality"
+CATEGORY_ORDER="runtimes pkgmgr versionmgr buildtools mobile cloud data vcs ai editors cli quality"
 
 if [ "$LIST_ONLY" -eq 1 ]; then
   for c in $CATEGORY_ORDER; do
@@ -400,6 +424,10 @@ run_category() {
         ;;
       *)
         path="$(command -v "$bin" 2>/dev/null || true)"
+        # `command -v` also resolves shell builtins, keywords and aliases —
+        # `continue`, for one, would otherwise report as an installed tool.
+        # Only an absolute path counts as a real executable.
+        case "$path" in /*) ;; *) path="" ;; esac
         if [ -n "$path" ]; then
           ok=1
           if [ "$PROBE_VERSIONS" -eq 1 ]; then
@@ -668,6 +696,15 @@ jq|brew=jq apt=jq dnf=jq pacman=jq apk=jq
 yq|brew=yq apt=yq dnf=yq pacman=go-yq
 htop|brew=htop apt=htop dnf=htop pacman=htop apk=htop
 btop|brew=btop apt=btop dnf=btop pacman=btop apk=btop
+yazi|brew=yazi pacman=yazi apk=yazi cargo=yazi-fm
+ranger|brew=ranger apt=ranger dnf=ranger pacman=ranger apk=ranger pipx=ranger-fm
+nnn|brew=nnn apt=nnn dnf=nnn pacman=nnn apk=nnn
+lf|brew=lf pacman=lf apk=lf
+mc|brew=midnight-commander apt=mc dnf=mc pacman=mc apk=mc
+broot|brew=broot pacman=broot cargo=broot
+xplr|brew=xplr pacman=xplr cargo=xplr
+vifm|brew=vifm apt=vifm dnf=vifm pacman=vifm apk=vifm
+spf|brew=superfile pacman=superfile
 tree|brew=tree apt=tree dnf=tree pacman=tree apk=tree
 curl|brew=curl apt=curl dnf=curl pacman=curl apk=curl
 wget|brew=wget apt=wget dnf=wget pacman=wget apk=wget
@@ -681,6 +718,18 @@ ffmpeg|brew=ffmpeg apt=ffmpeg dnf=ffmpeg pacman=ffmpeg apk=ffmpeg
 magick|brew=imagemagick apt=imagemagick dnf=ImageMagick pacman=imagemagick apk=imagemagick
 pandoc|brew=pandoc apt=pandoc dnf=pandoc pacman=pandoc
 tesseract|brew=tesseract apt=tesseract-ocr dnf=tesseract pacman=tesseract
+
+codex|npm=@openai/codex cask=codex
+gemini|npm=@google/gemini-cli brew=gemini-cli
+copilot|npm=@github/copilot
+pi|npm=@earendil-works/pi-coding-agent
+opencode|npm=opencode-ai
+amp|npm=@sourcegraph/amp
+crush|brew=charmbracelet/tap/crush npm=@charmland/crush
+goose|brew=block-goose-cli
+aider|brew=aider pipx=aider-chat
+llm|brew=llm pipx=llm
+ollama|brew=ollama
 
 shellcheck|brew=shellcheck apt=shellcheck dnf=ShellCheck pacman=shellcheck apk=shellcheck
 shfmt|brew=shfmt apt=shfmt dnf=shfmt pacman=shfmt
@@ -699,6 +748,9 @@ semgrep|brew=semgrep pipx=semgrep
 # pipe a remote script into a shell, so they are always shown in full and
 # never bundled into a silent batch.
 SCRIPT_RECIPES='
+claude|curl -fsSL https://claude.ai/install.sh | bash
+hermes|curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash
+cursor-agent|curl https://cursor.com/install -fsS | bash
 rustc|curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh
 cargo|curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh
 rustup|curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh
